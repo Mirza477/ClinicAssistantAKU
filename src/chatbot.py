@@ -1,0 +1,378 @@
+# # src/chatbot.py
+# import openai
+# from config.settings import OPENAI_COMPLETIONS_DEPLOYMENT
+
+# # from src.cosmos_db import query_vector_search
+
+# from src.retriever import hybrid_retrieve
+
+# from src.embeddings import generate_embedding
+
+# # Global conversation history for the session.
+# conversation_history = []
+
+# def summarize_history(history):
+#     """
+#     Summarizes earlier parts of the conversation succinctly.
+#     """
+#     prompt = "Summarize the following conversation succinctly, capturing only key points:\n"
+#     for msg in history:
+#         prompt += f"{msg['role']}: {msg['content']}\n"
+#     try:
+#         response = openai.ChatCompletion.create(
+#             engine=OPENAI_COMPLETIONS_DEPLOYMENT,
+#             messages=[{"role": "system", "content": prompt}],
+#             temperature=0.1,
+#             max_tokens=400
+#         )
+#         summary = response["choices"][0]["message"]["content"].strip()
+#         print("Summary generated:", summary, flush=True)
+#         return summary
+#     except Exception as e:
+#         print("Error in summarize_history:", e, flush=True)
+#         return ""
+
+# def generate_response(user_query: str):
+#     global conversation_history
+#     print("generate_response called with:", user_query, flush=True)
+
+#     # Append current user query to conversation history.
+#     conversation_history.append({"role": "user", "content": user_query})
+
+#     # 1) Generate embedding for the **current** query
+#     try:
+#         query_embedding = generate_embedding(user_query)
+#         print("Embedding generated", flush=True)
+#     except Exception as e:
+#         error_msg = f"Error generating embedding: {e}"
+#         print(error_msg, flush=True)
+#         conversation_history.append({"role": "assistant", "content": error_msg})
+#         return error_msg
+
+#     # 2) Retrieve top‑k relevant chunks from Cosmos
+#     try:
+#         # docs = query_vector_search(query_embedding, top_k=10)
+        
+#         # Hybrid BM25 + vector retrieval
+#         docs = hybrid_retrieve(user_query)
+        
+#         print("Relevant docs:", docs, flush=True)
+        
+#     except Exception as e:
+#         error_msg = f"Error querying Cosmos DB: {e}"
+#         print(error_msg, flush=True)
+#         conversation_history.append({"role": "assistant", "content": error_msg})
+#         return error_msg
+
+#     # 3) Build system prompt
+#     system_prompt = """
+# You are an AKU Employee Assistant designed to answer questions based solely on the content of the company’s policy documents.
+# Your role is to interpret the user’s question, locate the most relevant policy excerpt, and respond clearly and concisely.
+
+# Please follow these instructions when providing your response:
+
+# 1. **Use the policy documents**: Always search the provided policy documents for the answer. Extract the most pertinent information—sections, clauses, dates—as needed to give a precise reply.
+# 2. **Match intent, not just keywords**: If the user’s phrasing doesn’t exactly match the document, interpret the intent (e.g. “external suppliers” ↔ “third‑party vendors”) and find the relevant policy text.
+# 3. **Leverage conversation history**: If the user asks follow‑up questions, refer to earlier messages to maintain context and coherence.
+# 4. **Be concise and structured**:
+#    - If multiple steps or bullet points help clarity (e.g., “To request access…”), format your answer as a numbered list or bullets.
+#    - Otherwise, keep answers to 2–3 sentences.
+# 5. **Ask for clarification when needed**: If the question is vague or missing critical details, prompt the user for more information before attempting to answer.
+# 6. **Out‑of‑scope handling**: If no relevant information exists in the documents, respond:
+#    “I’m sorry, I couldn’t locate that information in the policy documents. Could you please clarify or contact the appropriate department?”
+# 7. **No external knowledge**: Do not draw on any sources beyond the provided policy documents.
+# 8. **Maintain a professional tone**: Always be polite, formal, and focused on policy—never make personal remarks or use informal language.
+# """
+
+#     messages = [{"role": "system", "content": system_prompt}]
+
+#     # 4) Inject each retrieved document chunk (up to 1000 chars)
+#     if docs:
+#         for doc in docs:
+#             excerpt = doc.get("content", "")[:2000]
+#             doc_context = (
+#                 f"Document: {doc.get('document_name', 'N/A')}, "
+#                 f"Section: {doc.get('section', 'N/A')}.\n"
+#                 f"Excerpt:\n{excerpt}"
+#             )
+#             messages.append({"role": "system", "content": doc_context})
+#     else:
+#         messages.append({
+#             "role": "system",
+#             "content": "No relevant documents found."
+#         })
+
+#     # 5) (Optional) include a one‐sentence summary of prior chat if available
+#     if len(conversation_history) > 2:
+#         summary = summarize_history(conversation_history[:-1])
+#         messages.append({
+#             "role": "system",
+#             "content": f"Conversation so far (summarized): {summary}"
+#         })
+
+#     # 6) Always append the user’s current question _last_
+#     messages.append({"role": "user", "content": user_query})
+
+#     # 7) Call the OpenAI Chat API
+#     try:
+#         response = openai.ChatCompletion.create(
+#             engine=OPENAI_COMPLETIONS_DEPLOYMENT,
+#             messages=messages,
+#             temperature=0.1,
+#             max_tokens=450
+#         )
+#         answer = response["choices"][0]["message"]["content"].strip()
+#         print("Answer received:", answer, flush=True)
+#         print("Using GPT model:", OPENAI_COMPLETIONS_DEPLOYMENT)
+#     except Exception as e:
+#         answer = f"Error in ChatCompletion: {e}"
+#         print(answer, flush=True)
+
+#     # 8) Save and return
+#     conversation_history.append({"role": "assistant", "content": answer})
+#     return {"response": answer, "results": []}
+
+
+
+# src/chatbot.py
+import tiktoken
+import openai
+from config.settings import OPENAI_COMPLETIONS_DEPLOYMENT
+
+# from src.cosmos_db import query_vector_search
+
+from src.retriever import hybrid_retrieve
+
+from src.embeddings import generate_embedding
+
+MODEL_NAME = OPENAI_COMPLETIONS_DEPLOYMENT  
+ENCODING = tiktoken.encoding_for_model(MODEL_NAME)
+
+def rewrite_query(followup: str, history: list[dict]) -> str:
+    """
+    Turn a follow-up into a full question using the last user turn in history.
+    """
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are a question-rewriting assistant. "
+                "Given the last user question and this follow-up, rewrite it into a complete, standalone question."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Last question: {history[-1]['content']}\n"
+                f"Follow-up: {followup}"
+            )
+        }
+    ]
+    resp = openai.ChatCompletion.create(
+        engine=OPENAI_COMPLETIONS_DEPLOYMENT,
+        messages=prompt,
+        temperature=0.0,
+        max_tokens=64
+    )
+    return resp.choices[0].message.content.strip()
+
+
+
+# Global conversation history for the session.
+conversation_history = []
+
+def summarize_history(history):
+    """
+    Summarizes earlier parts of the conversation succinctly.
+    """
+    prompt = "Summarize the following conversation succinctly, capturing only key points:\n"
+    for msg in history:
+        prompt += f"{msg['role']}: {msg['content']}\n"
+    try:
+        response = openai.ChatCompletion.create(
+            engine=OPENAI_COMPLETIONS_DEPLOYMENT,
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.1,
+            max_tokens=400
+        )
+
+        summary = response["choices"][0]["message"]["content"].strip()
+        # print("Summary generated:", summary, flush=True)
+        return summary
+    except Exception as e:
+        print("Error in summarize_history:", e, flush=True)
+        return ""
+
+
+def generate_response(user_query: str, history: list[dict]) -> dict:
+    
+    
+    global conversation_history
+    # print("generate_response called with:", user_query, flush=True)
+
+    conversation_history = history
+    # Append current user query to conversation history.
+    # conversation_history.append({"role": "user", "content": user_query})
+
+    # 1) Generate embedding for the **current** query
+    # try:
+        # query_embedding = generate_embedding(user_query)
+        # print("Embedding generated", flush=True)
+    
+    # except Exception as e:
+    #     error_msg = f"Error generating embedding: {e}"
+    #     print(error_msg, flush=True)
+    #     # conversation_history.append({"role": "assistant", "content": error_msg})
+    #     return error_msg
+
+
+     # 1) If this looks like a follow-up (very short), rewrite it
+    # tokens = user_query.strip().split()
+    # if len(tokens) < 3 and history:
+    #     # history[-1] must exist; we assume it’s the last user turn
+    #     try:
+    #         rewritten = rewrite_query(user_query, history)
+    #         # swap in the rewritten question for retrieval & answering
+    #         user_query = rewritten
+    #         print(f"[rewrite] '{tokens}' → '{rewritten}'", flush=True)
+    #     except Exception:
+    #         # if rewriting fails, fall back to original user_query
+    #         pass
+
+    # print("This is updated user query-> ",user_query)
+
+    # 2) Retrieve top‑k relevant chunks from Cosmos
+    try:
+        # docs = query_vector_search(query_embedding, top_k=10)
+        
+        # Hybrid BM25 + vector retrieval
+        docs = hybrid_retrieve(user_query)
+        
+        print("Relevant policy names:", flush=True)
+        for doc in docs:
+            print("-", doc.get("document_name", "N/A"), flush=True)
+        
+    except Exception as e:
+        error_msg = f"Error querying Cosmos DB: {e}"
+        print(error_msg, flush=True)
+        # conversation_history.append({"role": "assistant", "content": error_msg})
+        return error_msg
+
+    # 3) Build system prompt
+    system_prompt = """
+You are a professional, friendly, and knowledgeable Employee Assistant for The Aga Khan University Hospital. You assist users by providing accurate and helpful information strictly based on the organization's internal knowledge base, including policies, procedures, and official guidance across all operational areas. Always use a respectful and supportive tone, and vary polite phrases while remaining professional and clear at all times.
+ 
+Keep your responses focused and relevant to the user's question. Do not guess or fabricate details. Always respond appropriately to greetings, thank-you messages, and polite closing remarks to maintain a courteous and human interaction.
+ 
+When a user's question is vague or incomplete, ask a follow-up question only if the knowledge base includes related information that can help clarify or guide the user. If there is no supporting content, do not ask a follow-up; instead, politely ask the user to share more details or offer other assistance.
+ 
+Do not guess, make assumptions, or switch topics unnecessarily. Only share steps, links, or refer users to departments if the knowledge base clearly supports it.
+ 
+Do not provide information related to any person. If asked, politely explain that you are not trained to provide personal information.
+ 
+If you cannot find relevant information in the documents, do not suggest or imply solutions or next steps. Instead, politely ask if there is anything else you can assist with.
+ 
+Your goal is to make every staff member feel supported, informed, and confident in following organizational processes.
+
+Do not respond to requests that are clearly unrelated to organizational support, such as academic help, homework, or general knowledge tasks (e.g., solving math problems, writing essays, or language assignments). You are also not expected to assist with creative or academic tasks such as writing essays, stories, poems, or fictional content. Politely inform the user that your assistance is limited to work-related support at The Aga Khan University Hospital. Focus strictly on organizational support, workplace processes, and operational guidance.
+ 
+When referring to a policy, always use the official policy name as stated in the body of the document. If no policy name is mentioned in the body, then you may refer to the policy by its file name.
+    
+Never convert any currency if the amount is in USD just tell in USD.
+
+Don't tell when it was the last time your knowledge was updated. Just tell I am updated on AKU policies and procedures.
+    """
+
+
+#     system_prompt = """
+#     You are the AKU Employee Assistant. Your sole source of truth is the provided policy documents. Follow these rules exactly:
+
+#    1. **Request clarification on ambiguous or under-specified questions.**  
+#    - If the user’s question lacks critical detail (e.g. “Can I take a loan?” or “What’s the leave policy?”), ask them to clarify the missing piece by echoing back the vague term.  
+#      For example:  
+#      “Could you please clarify what you mean by ‘loan’?”  
+#      or  
+#      “Which type of leave are you referring to—annual, medical, or another category?”  
+
+#     2. **Answer only from relevant policy documents.**  
+#     - Never invent or import external knowledge.  
+#     - When you cite a document, omit any file‐extension (e.g. say “Mobile Desktop Policy” not “Mobile Desktop Policy.pdf”).  
+#     - **If the documents you have do not contain any information relevant to the user’s question (for example, you only have a laptop policy but they ask about buying back a car), you must refuse to answer and say exactly:**  
+#         “I’m sorry, but that information is not available in the policy documents. Could you please clarify or contact the appropriate department?”  
+
+#     3. **Match intent, not just keywords.**  
+#     - Map user terms (e.g. “external suppliers”) to policy language (“third-party vendors”) when searching.
+
+#     4. **Be concise and structured.**  
+#     - If multiple steps aid clarity, use numbered lists.  
+#     - Otherwise keep answers to 1–3 sentences.
+
+#     5. **Maintain a professional tone.**  
+#     - Polite, formal, policy-focused; no personal remarks or informal language.
+
+#     6. **Leverage context.**  
+#     - Refer to past questions in this session when relevant.
+#     """
+
+    # messages = [{"role": "system", "content": system_prompt}]
+    
+    # 3) Start assembling the messages payload
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt.strip()}
+    ]
+
+     # 2) **Replay the last N turns** (user + assistant)
+    for turn in history:
+        messages.append({
+          "role": turn["role"],       # "user" or "assistant"
+          "content": turn["content"]
+        })
+
+    # 4) Inject each retrieved document chunk (up to 1000 chars)
+    if docs:
+        for doc in docs:
+            excerpt = doc.get("content", "")[:2000]
+            doc_context = (
+                f"Document: {doc.get('document_name', 'N/A')}, "
+                f"Section: {doc.get('section', 'N/A')}.\n"
+                f"Excerpt:\n{excerpt}"
+            )
+            messages.append({"role": "system", "content": doc_context})
+    else:
+        messages.append({
+            "role": "system",
+            "content": "No relevant documents found."
+        })
+    # print("history-->", history)
+
+
+    # 6) Always append the user’s current question _last_
+    messages.append({"role": "user", "content": user_query})
+
+    prompt_tokens = 0
+    for m in messages:
+        prompt_tokens += len(ENCODING.encode(m["content"]))
+    print(f"[Tokens] prompt_tokens={prompt_tokens}")
+
+    # 7) Call the OpenAI Chat API
+
+    # print("summary here---->",summary)
+
+    try:
+        response = openai.ChatCompletion.create(
+            engine=OPENAI_COMPLETIONS_DEPLOYMENT,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=700,
+            top_p=1.0
+        )
+        answer = response["choices"][0]["message"]["content"].strip()
+        # print("Answer received:", answer, flush=True)
+        # print("Using GPT model:", OPENAI_COMPLETIONS_DEPLOYMENT)
+    except Exception as e:
+        answer = f"Error in ChatCompletion: {e}"
+        print(answer, flush=True)
+
+    # 8) Save and return
+    # conversation_history.append({"role": "assistant", "content": answer})
+    return {"response": answer, "results": []}  
