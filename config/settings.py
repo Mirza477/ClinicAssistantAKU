@@ -11,7 +11,7 @@ OPENAI_COMPLETIONS_DEPLOYMENT = os.getenv("OPENAI_COMPLETIONS_DEPLOYMENT", "gpt-
 COSMOS_URI = os.getenv("COSMOS_URI", "https://akurag1.documents.azure.com:443/")
 COSMOS_KEY = os.getenv("COSMOS_KEY", "rsICHsUdvbEuN0g4NoiIuJMTmzDFKYlpbtUAMe3ohXIFqwXMqb9eWCPHhR4UBD2GEGHbNe6VX6Z4ACDbh2PY7w==")
 COSMOS_DATABASE = os.getenv("COSMOS_DATABASE", "policy_db")
-COSMOS_CONTAINER = os.getenv("COSMOS_CONTAINER", "policy_vector_2")
+COSMOS_CONTAINER = os.getenv("COSMOS_CONTAINER", "ClinicalGuidelines")
 # COSMOS_CONTAINER = os.getenv("COSMOS_CONTAINER", "policy_kb_v2")
 
 COSMOS_FEEDBACK_URI = os.getenv("COSMOS_FEEDBACK_URI", "https://aku-chatbot-feedback.documents.azure.com:443/")
@@ -32,5 +32,4 @@ FORM_RECOGNIZER_ENDPOINT = "https://docu-int-2025.cognitiveservices.azure.com/"
 FORM_RECOGNIZER_KEY      = "A6e1R9sb0495XfE9qHQc1gLFKRhHYEQkLortiU3ieyQCn0vwMox7JQQJ99BGACYeBjFXJ3w3AAALACOGCvLb"
 
 
-CLINICAL_INSTRUCTIONS_DIR = r"C:\Users\hussain.baig\OneDrive - Aga Khan University\Desktop\Clinic Assistant\Clinic Assistant - Backend\data\Clinical_Instructions"
-
+CLINICAL_INSTRUCTIONS_DIR = r"C:\Users\hussain.baig\OneDrive - Aga Khan University\Desktop\ClinicAssistantAKU\data\Clinical_Instructions"

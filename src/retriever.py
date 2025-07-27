@@ -18,7 +18,7 @@ except LookupError:
 
 
 class HybridRetriever:
-    def __init__(self, top_k_bm25: int = 20, top_k_vec: int = 20):
+    def __init__(self, top_k_bm25: int = 20, top_k_vec: int = 15):
         # Initialize Cosmos DB client and fetch all stored chunks
         client = CosmosClient(url=COSMOS_URI, credential=COSMOS_KEY)
         db = client.get_database_client(COSMOS_DATABASE)
