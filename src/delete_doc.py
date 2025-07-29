@@ -20,4 +20,4 @@ def delete_document(doc_name: str):
     print("Done.")
 
 if __name__ == "__main__":
-    delete_document("PostOp Anesthesia Care v1 final 1.pdf")
+    delete_document("Bipolar Disorder- Psych-210624 - v1.pdf")

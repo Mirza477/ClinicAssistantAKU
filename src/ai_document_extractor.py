@@ -1,5 +1,5 @@
 # src/ai_document_extractor.py
-
+import re
 import uuid
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -7,6 +7,25 @@ from .embeddings import generate_embedding
 from .cosmos_db import upsert_policy_section, get_cosmos_container
 from tabulate import tabulate
 from config.settings import FORM_RECOGNIZER_ENDPOINT, FORM_RECOGNIZER_KEY
+
+
+def extract_recommendation_chunks(paragraphs):
+    """
+    Returns a list of dicts, each containing a recommendation statement WITH its label.
+    Only splits at lines ending with [Strong recommendation], [Moderate recommendation], [Conditional recommendation], etc.
+    """
+    # Combine all paragraph text
+    full_text = "\n".join([p.content.strip() for p in paragraphs])
+    # Regex for ".... [Strong recommendation]" and similar
+    pattern = r"([^\n]+?\[[^\]]+recommendation[^\]]*\])"
+    matches = re.findall(pattern, full_text, flags=re.IGNORECASE)
+    chunks = []
+    for idx, match in enumerate(matches, 1):
+        chunks.append({
+            "title": f"Recommendation {idx}",
+            "content": match.strip()
+        })
+    return chunks
 
 def extract_and_embed(pdf_path: str, doc_name: str):
     # 1) Initialize client
@@ -20,26 +39,30 @@ def extract_and_embed(pdf_path: str, doc_name: str):
         poller = client.begin_analyze_document("prebuilt-layout", stream)
         result = poller.result()
 
-    # 3) Chunk by headings + paragraphs
-    chunks = []
-    current = {"title": None, "content": ""}
 
-    for para in result.paragraphs or []:
-        text = para.content.strip()
-        is_heading = (
-            getattr(para, "role", None) == "sectionHeading"
-            or text.isupper()
-        )
-        if is_heading:
-            if current["title"]:
-                chunks.append(current)
-            current = {"title": text, "content": ""}
-        else:
-            current["content"] += text + "\n\n"
+#    Old logic where the ingestion was different
+    # # 3) Chunk by headings + paragraphs
+    # chunks = []
+    # current = {"title": None, "content": ""}
 
-    # append last chunk
-    if current["title"]:
-        chunks.append(current)
+    # for para in result.paragraphs or []:
+    #     text = para.content.strip()
+    #     is_heading = (
+    #         getattr(para, "role", None) == "sectionHeading"
+    #         or text.isupper()
+    #     )
+    #     if is_heading:
+    #         if current["title"]:
+    #             chunks.append(current)
+    #         current = {"title": text, "content": ""}
+    #     else:
+    #         current["content"] += text + "\n\n"
+
+    # # append last chunk
+    # if current["title"]:
+    #     chunks.append(current)
+
+    chunks = extract_recommendation_chunks(result.paragraphs)
 
     # 4) Attach **all** tables to the last chunk
     for tbl in result.tables or []:
