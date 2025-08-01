@@ -7,6 +7,8 @@ from nltk.tokenize import word_tokenize
 from config.settings import COSMOS_URI, COSMOS_KEY, COSMOS_DATABASE, COSMOS_CONTAINER
 from src.cosmos_db import query_vector_search
 from src.embeddings import generate_embedding
+from src.cosmos_db import get_cosmos_container
+
 
 import nltk
 
@@ -27,7 +29,13 @@ class HybridRetriever:
 
         # Prepare BM25 index
         self.items = items
-        self.corpus_tokens = [word_tokenize(itm['content'].lower()) for itm in items]
+        # self.corpus_tokens = [word_tokenize(itm['content'].lower()) for itm in items]
+        self.corpus_tokens = [
+            word_tokenize(
+                (itm.get('content') or itm.get('recommendation') or '').lower()
+            )
+            for itm in items
+        ]
         self.bm25 = BM25Okapi(self.corpus_tokens)
         self.top_k_bm25 = top_k_bm25
         self.top_k_vec = top_k_vec
@@ -63,3 +71,18 @@ def hybrid_retrieve(query: str):
     Each hit is a dict with keys: id, document_name, section, content, (and score for vector hits).
     """
     return _retriever.retrieve(query)
+
+def get_recommendations_by_section(section=None, subsection=None, doc_name=None):
+    container = get_cosmos_container()
+    query = "SELECT * FROM c WHERE 1=1"
+    params = []
+    if section:
+        query += " AND LOWER(c.section) = @section"
+        params.append({"name": "@section", "value": section.lower()})
+    if subsection:
+        query += " AND LOWER(c.subsection) = @subsection"
+        params.append({"name": "@subsection", "value": subsection.lower()})
+    if doc_name:
+        query += " AND c.document_name = @doc_name"
+        params.append({"name": "@doc_name", "value": doc_name})
+    return list(container.query_items(query, parameters=params, enable_cross_partition_query=True))

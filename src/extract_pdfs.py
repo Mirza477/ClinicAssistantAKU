@@ -8,7 +8,11 @@ from .cosmos_db import upsert_policy_section, get_cosmos_container
 from .embeddings import generate_embedding
 from src.ai_document_extractor import extract_and_embed
 
+import sys
 
+
+def process_clinical_document(pdf_path, doc_name):
+    extract_and_embed(pdf_path, doc_name)
 
 def extract_text_and_tables(pdf_path: str):
     """
@@ -32,7 +36,6 @@ def process_clinical_instructions():
     for fname in os.listdir(CLINICAL_INSTRUCTIONS_DIR):
         if not fname.lower().endswith(".pdf"):
             continue
-
         # skip if already ingested
         seen = list(container.query_items(
             query="SELECT c.id FROM c WHERE c.document_name=@doc",
@@ -42,7 +45,6 @@ def process_clinical_instructions():
         if seen:
             print(f"⏭️  {fname} already ingested.")
             continue
-
         path = os.path.join(CLINICAL_INSTRUCTIONS_DIR, fname)
         print(f"📄 Ingesting clinical doc: {fname}")
         extract_and_embed(path, fname)
@@ -116,4 +118,5 @@ def process_pdfs():
 
 if __name__ == "__main__":
     process_pdfs()
+
     process_clinical_instructions()

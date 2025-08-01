@@ -141,7 +141,7 @@ from config.settings import OPENAI_COMPLETIONS_DEPLOYMENT
 
 # from src.cosmos_db import query_vector_search
 
-from src.retriever import hybrid_retrieve
+from src.retriever import hybrid_retrieve, get_recommendations_by_section
 
 from src.embeddings import generate_embedding
 
@@ -211,41 +211,33 @@ def generate_response(user_query: str, history: list[dict]) -> dict:
     # print("generate_response called with:", user_query, flush=True)
 
     conversation_history = history
-    # Append current user query to conversation history.
-    # conversation_history.append({"role": "user", "content": user_query})
-
-    # 1) Generate embedding for the **current** query
-    # try:
-        # query_embedding = generate_embedding(user_query)
-        # print("Embedding generated", flush=True)
-    
-    # except Exception as e:
-    #     error_msg = f"Error generating embedding: {e}"
-    #     print(error_msg, flush=True)
-    #     # conversation_history.append({"role": "assistant", "content": error_msg})
-    #     return error_msg
-
-
-     # 1) If this looks like a follow-up (very short), rewrite it
-    # tokens = user_query.strip().split()
-    # if len(tokens) < 3 and history:
-    #     # history[-1] must exist; we assume it’s the last user turn
-    #     try:
-    #         rewritten = rewrite_query(user_query, history)
-    #         # swap in the rewritten question for retrieval & answering
-    #         user_query = rewritten
-    #         print(f"[rewrite] '{tokens}' → '{rewritten}'", flush=True)
-    #     except Exception:
-    #         # if rewriting fails, fall back to original user_query
-    #         pass
-
-    # print("This is updated user query-> ",user_query)
+  
 
     # 2) Retrieve top‑k relevant chunks from Cosmos
     try:
         # docs = query_vector_search(query_embedding, top_k=10)
         
         # Hybrid BM25 + vector retrieval
+
+
+            # ---- NEW: Section/Subsection logic ----
+        # This is just a simple matching—customize for your clinical document structure!
+        if "dummy critical ill patient" in user_query.lower():
+            matches = get_recommendations_by_section(subsection="Dummy Critical ill patient")
+            if matches:
+                resp = []
+                for m in matches:
+                    txt = m['recommendation']
+                    if m.get("label"):
+                        txt += f" ({m['label']})"
+                    resp.append(txt)
+                return {"response": "\n\n".join(resp), "results": matches}
+            # if no matches, continue to hybrid as fallback
+
+        # ---- Fallback to hybrid_retrieve ----
+        # (all your existing logic)
+        # docs = hybrid_retrieve(user_query)
+        # ...rest unchanged...
         docs = hybrid_retrieve(user_query)
         
         print("Relevant policy names:", flush=True)
@@ -315,16 +307,17 @@ Don't tell when it was the last time your knowledge was updated. Just tell I am 
     # 4) Inject each retrieved document chunk (up to 1000 chars)
     if docs:
         for doc in docs:
-            excerpt = doc.get("content", "")
+            excerpt = doc.get("content", "") or doc.get("recommendation") or ""
             doc_context = (
                 f"Document: {doc.get('document_name', 'N/A')}, "
                 f"Section: {doc.get('section', 'N/A')}.\n"
+                f"Subsection: {doc.get('subsection', 'N/A')}.\n"
                 f"Excerpt:\n{excerpt}"
             )
             messages.append({"role": "system", "content": doc_context})
     else:
         messages.append({
-            "role": "system",
+            "role": "system",   
             "content": "No relevant documents found."
         })
     # print("history-->", history)
@@ -341,7 +334,7 @@ Don't tell when it was the last time your knowledge was updated. Just tell I am 
     # 7) Call the OpenAI Chat API
 
     # print("summary here---->",summary)
-
+    print("message here--> ", messages)
     try:
         response = openai.ChatCompletion.create(
             engine=OPENAI_COMPLETIONS_DEPLOYMENT,

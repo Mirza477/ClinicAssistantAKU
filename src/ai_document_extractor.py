@@ -1,120 +1,111 @@
-# src/ai_document_extractor.py
 import re
 import uuid
+import json
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from .embeddings import generate_embedding
 from .cosmos_db import upsert_policy_section, get_cosmos_container
-from tabulate import tabulate
 from config.settings import FORM_RECOGNIZER_ENDPOINT, FORM_RECOGNIZER_KEY
 
+def parse_recommendation_blocks(text):
+    """
+    Custom parser for recommendation blocks formatted like:
+    Section Heading: Table of Recommendations
+    Main Heading: Management
+    Subheading1: Frail, older patients
+    Recommendation: ...
+    Strength and level of evidence: ...
+    Refer to specialist: Yes/No
+    (multiple blocks in same text allowed)
+    """
+    # This regex will match all blocks between Section Heading and next Section Heading
+    pattern = re.compile(
+        r"Section Heading: Table of Recommendations\s*"
+        r"Main Heading:\s*(.*?)\s*"
+        r"Subheading1:\s*(.*?)\s*"
+        r"Recommendation:\s*(.*?)\s*"
+        r"Strength and level of evidence:\s*(.*?)\s*"
+        r"Refer to specialist:\s*(.*?)\s*(?=Section Heading:|$)",
+        re.DOTALL | re.IGNORECASE,
+    )
 
-def extract_recommendation_chunks(paragraphs):
-    """
-    Returns a list of dicts, each containing a recommendation statement WITH its label.
-    Only splits at lines ending with [Strong recommendation], [Moderate recommendation], [Conditional recommendation], etc.
-    """
-    # Combine all paragraph text
-    full_text = "\n".join([p.content.strip() for p in paragraphs])
-    # Regex for ".... [Strong recommendation]" and similar
-    pattern = r"([^\n]+?\[[^\]]+recommendation[^\]]*\])"
-    matches = re.findall(pattern, full_text, flags=re.IGNORECASE)
-    chunks = []
-    for idx, match in enumerate(matches, 1):
-        chunks.append({
-            "title": f"Recommendation {idx}",
-            "content": match.strip()
+    blocks = []
+    for match in pattern.finditer(text):
+        blocks.append({
+            "section": match.group(1).strip(),
+            "subsection": match.group(2).strip(),
+            "recommendation": match.group(3).strip(),
+            "label": match.group(4).strip(),
+            "refer_specialist": match.group(5).strip().lower().startswith("y")
         })
-    return chunks
+    return blocks
 
 def extract_and_embed(pdf_path: str, doc_name: str):
-    # 1) Initialize client
     client = DocumentIntelligenceClient(
         FORM_RECOGNIZER_ENDPOINT,
         AzureKeyCredential(FORM_RECOGNIZER_KEY)
     )
-
-    # 2) Analyze with layout model
     with open(pdf_path, "rb") as stream:
         poller = client.begin_analyze_document("prebuilt-layout", stream)
         result = poller.result()
 
-
-#    Old logic where the ingestion was different
-    # # 3) Chunk by headings + paragraphs
-    # chunks = []
-    # current = {"title": None, "content": ""}
-
-    # for para in result.paragraphs or []:
-    #     text = para.content.strip()
-    #     is_heading = (
-    #         getattr(para, "role", None) == "sectionHeading"
-    #         or text.isupper()
-    #     )
-    #     if is_heading:
-    #         if current["title"]:
-    #             chunks.append(current)
-    #         current = {"title": text, "content": ""}
-    #     else:
-    #         current["content"] += text + "\n\n"
-
-    # # append last chunk
-    # if current["title"]:
-    #     chunks.append(current)
-
-    chunks = extract_recommendation_chunks(result.paragraphs)
-
-    # 4) Attach **all** tables to the last chunk
-    for tbl in result.tables or []:
-        # build a matrix from row_count, column_count, and tbl.cells
-        matrix = [["" for _ in range(tbl.column_count)] for _ in range(tbl.row_count)]
-        for cell in tbl.cells:
-            matrix[cell.row_index][cell.column_index] = cell.content
-        md = "\n".join("| " + " | ".join(row) + " |" for row in matrix)
-        if chunks:
-            chunks[-1]["content"] += "\n\nTable:\n" + md + "\n\n"
-
-    # 5) Flag selected checkboxes/radios (red dots)
-    # selection_marks live under each page
-    for page in result.pages or []:
-        for mark in page.selection_marks or []:
-            if mark.state == "selected" and chunks:
-                chunks[-1]["content"] += "\n[⚠️] Selection marked here\n\n"
-
-    # 6) Embed & upsert
     container = get_cosmos_container()
     document_id = str(uuid.uuid4())
+    all_recs = []
 
-    MAX_CHUNK_SIZE = 1000  # characters per embedding call
+    # Step 1: Join all paragraphs into one big text block (for easier recommendation block matching)
+    text_blocks = [para.content.strip() for para in result.paragraphs or [] if para.content.strip()]
+    big_text = "\n".join(text_blocks)
 
-    for chunk in chunks:
-        text = chunk["content"]
-        # simple character-based slicing; you can swap in a token-based splitter if you like
-        parts = [
-            text[i : i + MAX_CHUNK_SIZE]
-            for i in range(0, len(text), MAX_CHUNK_SIZE)
-        ]
+    # Step 2: Extract custom recommendations blocks from text
+    rec_blocks = parse_recommendation_blocks(big_text)
+    all_recs.extend(rec_blocks)
 
-        for idx, part in enumerate(parts, start=1):
-            section_name = chunk["title"]
-            if len(parts) > 1:
-                section_name = f"{section_name} (part {idx})"
+    # Step 3: Remove all parsed blocks from text (so they don't get duplicated as general recs)
+    for rec in rec_blocks:
+        block_text = (
+            f"Section Heading: Table of Recommendations\n"
+            f"Main Heading: {rec['section']}\n"
+            f"Subheading1: {rec['subsection']}\n"
+            f"Recommendation: {rec['recommendation']}\n"
+            f"Strength and level of evidence: {rec['label']}\n"
+            f"Refer to specialist: {'Yes' if rec['refer_specialist'] else 'No'}"
+        )
+        big_text = big_text.replace(block_text, "")
 
-            try:
-                emb = generate_embedding(part)
-            except Exception as e:
-                # log & skip this slice, but keep going
-                print(f"  ⚠️ Embedding failed for {section_name}: {e}")
-                continue
+    # Step 4: Now process remaining paragraphs as "normal" recommendations
+    heading_pat = re.compile(r"^[A-Z][A-Z\s]{3,}$")
+    subheading_pat = re.compile(r"^[A-Z][a-z\s\-]+$")
+    heading = ""
+    subheading = ""
+    for para in big_text.split('\n'):
+        text = para.strip()
+        if not text or text.startswith("Section Heading: Table of Recommendations"):
+            continue
+        if heading_pat.fullmatch(text):
+            heading = text
+            subheading = ""
+            continue
+        if subheading_pat.fullmatch(text) and not text.isupper():
+            subheading = text
+            continue
+        # Only treat as recommendation if not a heading or subheading
+        if not heading_pat.fullmatch(text) and not subheading_pat.fullmatch(text):
+            all_recs.append({
+                "section": heading,
+                "subsection": subheading,
+                "recommendation": text,
+                "label": "",
+                "refer_specialist": "refer" in text.lower(),
+            })
 
-            item = {
-                "id":            str(uuid.uuid4()),
-                "document_id":   document_id,
-                "document_name": doc_name,
-                "section":       section_name,
-                "content":       part,
-                "vector":        emb
-           }
-            upsert_policy_section(item)
+    # Step 5: Save to Cosmos DB
+    for rec in all_recs:
+        item = {
+            "id": str(uuid.uuid4()),
+            "document_id": document_id,
+            "document_name": doc_name,
+            **rec
+        }
+        upsert_policy_section(item)
+    print(f"✓ Ingested {len(all_recs)} recommendations from {doc_name}")
 
-    print(f"✓ Ingested {len(chunks)} chunks from {doc_name}")
